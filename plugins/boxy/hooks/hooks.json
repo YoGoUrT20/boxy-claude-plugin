@@ -1,0 +1,31 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/bin/boxy-hook\" SessionStart", "timeout": 30, "async": true}]}
+    ],
+    "SessionEnd": [
+      {"hooks": [{"type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/bin/boxy-hook\" SessionEnd", "timeout": 30, "async": true}]}
+    ],
+    "UserPromptSubmit": [
+      {"hooks": [{"type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/bin/boxy-hook\" UserPromptSubmit", "timeout": 30, "async": true}]}
+    ],
+    "Notification": [
+      {
+        "matcher": "idle_prompt|permission_prompt|agent_needs_input",
+        "hooks": [{"type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/bin/boxy-hook\" Notification", "timeout": 30, "async": true}]
+      }
+    ],
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/bin/boxy-hook\" Stop", "timeout": 3600}]}
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [{"type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/bin/boxy-hook\" PreToolUse", "timeout": 3600}]
+      }
+    ],
+    "PermissionRequest": [
+      {"hooks": [{"type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/bin/boxy-hook\" PermissionRequest", "timeout": 3600}]}
+    ]
+  }
+}

@@ -1,0 +1,3 @@
+# The hook script runs under bash on macOS and Linux too, where a CRLF line
+# ending breaks it. Keep every file here LF on every checkout.
+* text=auto eol=lf

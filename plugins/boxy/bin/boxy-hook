@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Boxy plugin for Claude Code: pipe one hook event to the Boxy server and
+# print its answer.
+#
+#   boxy-hook <EventName>      the event's JSON arrives on stdin
+#
+# The server decides what the hook does and answers with the exact JSON to
+# print (server/extensions/claude/hooks.py), so this file stays a dumb pipe.
+# 200 = the answer. 202 = the call is parked for a spoken answer: ask again
+# until it isn't. Anything else, any error, a computer that was never paired:
+# print nothing and exit 0, so Claude Code carries on with its own prompt.
+# This script must never break or block a session on its own.
+
+event="${1:-}"
+dir="${BOXY_CLAUDE_HOME:-$HOME/.boxy/claude}"
+[ -n "$event" ] && [ -r "$dir/token" ] && [ -r "$dir/server" ] || exit 0
+command -v curl >/dev/null 2>&1 || exit 0
+
+token=$(cat "$dir/token")
+server=$(cat "$dir/server")
+[ -n "$token" ] && [ -n "$server" ] || exit 0
+
+id="$(date +%s)-$$-${RANDOM:-0}"
+# how this session was started (cli, sdk-cli, claude-desktop, ...): the server
+# never parks a script's session, which would hang it waiting for a person
+entry=$(printf '%s' "${CLAUDE_CODE_ENTRYPOINT:-}" | tr -cd 'A-Za-z0-9_-' | cut -c1-40)
+out=$(mktemp 2>/dev/null) || exit 0
+trap 'rm -f "$out"' EXIT
+
+# only these wait for a person; the rest just report and return
+case "$event" in
+  Stop|PreToolUse|PermissionRequest) hold=1 ;;
+  *) hold=0 ;;
+esac
+
+code=$(curl -sS -o "$out" -w '%{http_code}' --max-time 20 -X POST \
+  -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+  --data-binary @- "$server/claude/hook?event=$event&id=$id&entry=$entry" 2>/dev/null) || exit 0
+
+# the server answers each poll within a minute (Cloudflare cuts a request at 100 s)
+misses=0
+while [ "$code" = 202 ] && [ "$hold" = 1 ]; do
+  code=$(curl -sS -o "$out" -w '%{http_code}' --max-time 75 \
+    -H "Authorization: Bearer $token" "$server/claude/hook/wait?id=$id" 2>/dev/null)
+  if [ $? -ne 0 ]; then
+    misses=$((misses + 1))
+    [ "$misses" -ge 3 ] && exit 0
+    sleep 2
+    code=202
+  else
+    misses=0
+  fi
+done
+
+[ "$code" = 200 ] && cat "$out"
+exit 0

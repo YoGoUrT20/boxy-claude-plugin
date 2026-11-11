@@ -1,0 +1,6 @@
+{
+  "name": "boxy",
+  "version": "0.1.0",
+  "description": "Lets your Boxy speaker tell you when Claude Code finished, asks something or needs permission, and pass your spoken answer back.",
+  "author": {"name": "Boxy"}
+}

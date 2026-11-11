@@ -1,0 +1,12 @@
+{
+  "name": "boxy",
+  "description": "The Boxy speaker's plugin for Claude Code.",
+  "owner": {"name": "Boxy"},
+  "plugins": [
+    {
+      "name": "boxy",
+      "source": "./plugins/boxy",
+      "description": "Lets your Boxy speaker tell you when Claude Code finished, asks something or needs permission, and pass your spoken answer back."
+    }
+  ]
+}
