@@ -20,6 +20,12 @@ token=$(cat "$dir/token")
 server=$(cat "$dir/server")
 [ -n "$token" ] && [ -n "$server" ] || exit 0
 
+# the bridge is what lets Boxy start, wake and stop sessions here; a session
+# starting is when it gets (re)started. It must not read the event on stdin.
+if [ "$event" = SessionStart ] && [ -f "${0%/*}/boxy-bridge" ]; then
+  bash "${0%/*}/boxy-bridge" ensure </dev/null >/dev/null 2>&1
+fi
+
 id="$(date +%s)-$$-${RANDOM:-0}"
 # how this session was started (cli, sdk-cli, claude-desktop, ...): the server
 # never parks a script's session, which would hang it waiting for a person

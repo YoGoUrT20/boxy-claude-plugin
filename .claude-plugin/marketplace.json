@@ -6,7 +6,7 @@
     {
       "name": "boxy",
       "source": "./plugins/boxy",
-      "description": "Lets your Boxy speaker tell you when Claude Code finished, asks something or needs permission, and pass your spoken answer back."
+      "description": "Lets your Boxy speaker tell you when Claude Code finished, asks something or needs permission, pass your spoken answer back, and start or stop sessions by voice."
     }
   ]
 }

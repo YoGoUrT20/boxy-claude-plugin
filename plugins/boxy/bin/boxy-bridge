@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+# Boxy plugin for Claude Code: the bridge. A small loop that stays on the
+# computer between sessions, asks the Boxy server for work and runs it: start
+# a background session, wake one, stop one.
+#
+#   boxy-bridge ensure     start the loop unless one is running (called from
+#                          the SessionStart hook and from the setup script)
+#   boxy-bridge run        the loop itself
+#
+# It only dials out (GET /claude/bridge/next, under a minute per ask), so
+# nothing on the computer listens. A command is one of a fixed few, each
+# mapped to one `claude` invocation. Text from the server is passed as a
+# single argument and never evaluated. The contract is
+# server/extensions/claude/bridge.py.
+#
+# Files in ~/.boxy/claude: bridge.pid (the running loop; a newer loop takes
+# over by writing its own) and bridge.alive (when it last went round).
+
+dir="${BOXY_CLAUDE_HOME:-$HOME/.boxy/claude}"
+self="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
+# how long one `claude` call may take before it is given up
+limit="${BOXY_BRIDGE_CMD_S:-30}"
+ALIVE_S=120
+
+paired() { [ -r "$dir/token" ] && [ -r "$dir/server" ]; }
+
+# only <value> <set for tr>: not empty and made of nothing but those characters
+only() { [ -n "$1" ] && [ -z "$(printf '%s' "$1" | LC_ALL=C tr -d "$2")" ]; }
+
+ensure() {
+  paired || exit 0
+  command -v curl >/dev/null 2>&1 || exit 0
+  at=$(cat "$dir/bridge.alive" 2>/dev/null)
+  only "$at" '0-9' || at=0
+  [ $(($(date +%s) - at)) -lt "$ALIVE_S" ] && exit 0
+  date +%s >"$dir/bridge.alive"     # a second call right behind this one starts nothing
+  # Detached, in its own process group, and holding none of the caller's
+  # stdin, stdout or stderr: a hook whose child keeps its stdout never ends.
+  if command -v setsid >/dev/null 2>&1; then
+    setsid bash "$self" run </dev/null >/dev/null 2>&1 &
+  else
+    ( set -m; bash "$self" run </dev/null >/dev/null 2>&1 & ) >/dev/null 2>&1
+  fi
+  exit 0
+}
+
+# claude_in <stdout file> <stderr file> <folder> <args...>: one `claude` call,
+# its output appended to the files, given up after $limit seconds.
+claude_in() {
+  local o="$1" e="$2" where="$3" pid n=0
+  shift 3
+  ( cd "$where" 2>/dev/null && exec claude "$@" ) </dev/null >>"$o" 2>>"$e" &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$n" -ge $((limit * 5)) ]; then
+      kill "$pid" 2>/dev/null
+      echo "claude did not answer within $limit seconds" >>"$o"
+      break
+    fi
+    sleep 0.2
+    n=$((n + 1))
+  done
+  wait "$pid" 2>/dev/null
+}
+
+# post <kind> <file> [command id]
+post() {
+  curl -sS -o /dev/null --max-time 20 -X POST -H "Authorization: Bearer $token" \
+    -H 'Content-Type: text/plain' --data-binary @- \
+    "$server/claude/bridge/report?kind=$1${3:+&cmd=$3}" <"$2" >/dev/null 2>&1
+}
+
+# The folders Claude Code was used in, and every session on this computer.
+report_lists() {
+  local root="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects" name newest
+  : >"$lists"
+  if [ -d "$root" ]; then
+    # one `"cwd":"..."` fragment per folder, from its newest transcript
+    ls -t "$root" 2>/dev/null | head -n 40 | while IFS= read -r name; do
+      newest=$(ls -t "$root/$name"/*.jsonl 2>/dev/null | head -n 1)
+      [ -n "$newest" ] && grep -o -m1 '"cwd":"[^"]*"' "$newest" 2>/dev/null | head -n 1
+    done >>"$lists"
+  fi
+  post projects "$lists"
+  : >"$lists"
+  claude_in "$lists" /dev/null "$dir" agents --json
+  post agents "$lists"
+}
+
+unpack() {
+  only "$1" 'A-Za-z0-9+/=' || return 0
+  printf '%s' "$1" | base64 -d 2>/dev/null || printf '%s' "$1" | base64 -D 2>/dev/null
+}
+
+# Run the command in $out (lines of `key value`) and post what it printed.
+run_command() {
+  local id="" op="" cwd="" text="" session="" key value
+  while read -r key value || [ -n "$key" ]; do
+    value="${value%$'\r'}"
+    case "$key" in
+      id) id="$value" ;;
+      op) op="$value" ;;
+      session) session="$value" ;;
+      cwd) cwd=$(unpack "$value") ;;
+      text) text=$(unpack "$value") ;;
+    esac
+  done <"$out"
+  only "$id" 'A-Za-z0-9_.-' && [ "${#id}" -le 64 ] || return 0
+  # an argument that starts with a dash would be read as an option
+  case "$text" in -*) text=" $text" ;; esac
+  : >"$res"
+  case "$op" in
+    send|stop)
+      if ! only "$session" '0-9a-fA-F-' || [ "${#session}" -lt 8 ] || [ "${#session}" -gt 40 ]; then
+        op=bad
+      fi
+      case "$session" in -*) op=bad ;; esac ;;
+  esac
+  case "$op" in
+    start|send)
+      if [ -z "$text" ]; then
+        echo "nothing to tell Claude" >>"$res"
+      elif [ -z "$cwd" ] || [ ! -d "$cwd" ]; then
+        echo "no such folder: $cwd" >>"$res"
+      elif [ "$op" = start ]; then
+        claude_in "$res" "$res" "$cwd" --bg "$text"
+      else
+        # without the stop Claude Code starts a copy instead of waking it
+        claude_in "$res" "$res" "$dir" stop "${session:0:8}"
+        claude_in "$res" "$res" "$cwd" --bg --resume "$session" "$text"
+      fi ;;
+    stop) claude_in "$res" "$res" "$dir" stop "$session" ;;
+    report) report_lists; echo "reported" >>"$res" ;;
+    *) echo "bad command" >>"$res" ;;
+  esac
+  head -c 8000 "$res" >"$out"
+  post result "$out" "$id"
+}
+
+run() {
+  paired || exit 0
+  command -v curl >/dev/null 2>&1 || exit 0
+  trap '' HUP
+  umask 077
+  # Started from a session's hook this inherits that session's variables, and
+  # a `claude` launched with them runs in bare mode with its hooks off.
+  for name in $(compgen -e); do
+    case "$name" in
+      CLAUDE_CONFIG_DIR) ;;
+      CLAUDE*|ANTHROPIC*) unset "$name" ;;
+    esac
+  done
+  # where the installer puts it, for a session that was started by full path
+  command -v claude >/dev/null 2>&1 || PATH="$HOME/.local/bin:$PATH"
+
+  out=$(mktemp 2>/dev/null) && res=$(mktemp 2>/dev/null) && lists=$(mktemp 2>/dev/null) || exit 0
+  echo "$$" >"$dir/bridge.pid"
+  mine() { [ "$(cat "$dir/bridge.pid" 2>/dev/null)" = "$$" ]; }
+  # on the way out: leave nothing that says a bridge is running, unless a
+  # newer one took over
+  trap 'rm -f "$out" "$res" "$lists"; mine && rm -f "$dir/bridge.pid" "$dir/bridge.alive"' EXIT
+
+  token=$(cat "$dir/token")
+  server=$(cat "$dir/server")
+  date +%s >"$dir/bridge.alive"
+  report_lists
+  round=0
+  while :; do
+    # unpaired, replaced by a newer bridge, or the plugin was uninstalled
+    paired && mine && [ -f "$self" ] || exit 0
+    token=$(cat "$dir/token")
+    server=$(cat "$dir/server")
+    [ -n "$token" ] && [ -n "$server" ] || exit 0
+    date +%s >"$dir/bridge.alive"
+    # the server answers within a minute (Cloudflare cuts a request at 100 s)
+    code=$(curl -sS -o "$out" -w '%{http_code}' --max-time 75 \
+      -H "Authorization: Bearer $token" "$server/claude/bridge/next" 2>/dev/null) || code=000
+    case "$code" in
+      200) run_command ;;
+      204) ;;
+      401) exit 0 ;;        # the computer was removed in the app
+      *) sleep 15 ;;
+    esac
+    round=$((round + 1))
+    [ $((round % 12)) -eq 0 ] && report_lists
+  done
+}
+
+case "${1:-}" in
+  ensure) ensure ;;
+  run) run ;;
+esac
+exit 0

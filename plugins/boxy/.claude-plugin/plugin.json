@@ -1,6 +1,6 @@
 {
   "name": "boxy",
-  "version": "0.1.0",
-  "description": "Lets your Boxy speaker tell you when Claude Code finished, asks something or needs permission, and pass your spoken answer back.",
+  "version": "0.2.0",
+  "description": "Lets your Boxy speaker tell you when Claude Code finished, asks something or needs permission, pass your spoken answer back, and start or stop sessions by voice.",
   "author": {"name": "Boxy"}
 }
