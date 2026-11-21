@@ -10,19 +10,37 @@
 # It only dials out (GET /claude/bridge/next, under a minute per ask), so
 # nothing on the computer listens. A command is one of a fixed few, each
 # mapped to one `claude` invocation. Text from the server is passed as a
-# single argument and never evaluated. The contract is
-# server/extensions/claude/bridge.py.
+# single argument and never evaluated, with one exception: `exec`, a shell
+# command from Boxy's agent, runs only while the person turned it on at this
+# computer (the `computer` file below says `on`). Each ask tells the server
+# whether it is on. The contract is server/extensions/claude/bridge.py.
 #
 # Files in ~/.boxy/claude: bridge.pid (the running loop; a newer loop takes
-# over by writing its own) and bridge.alive (when it last went round).
+# over by writing its own), bridge.alive (when it last went round), and
+# computer (`on`: Boxy's agent may run commands here; written by the person,
+# never by this script).
 
 dir="${BOXY_CLAUDE_HOME:-$HOME/.boxy/claude}"
 self="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
 # how long one `claude` call may take before it is given up
 limit="${BOXY_BRIDGE_CMD_S:-30}"
+# how long one command of Boxy's agent may run
+exec_limit="${BOXY_BRIDGE_EXEC_S:-60}"
 ALIVE_S=120
 
 paired() { [ -r "$dir/token" ] && [ -r "$dir/server" ]; }
+
+# bridge.alive, written whole: `date >file` empties it first, and an `ensure`
+# that read it in that moment saw no bridge and started a second one
+stamp() {
+  date +%s >"$dir/bridge.alive.$$" && mv -f "$dir/bridge.alive.$$" "$dir/bridge.alive" \
+    || rm -f "$dir/bridge.alive.$$"
+}
+
+# Boxy's agent may run commands here only while the person's own file says so
+computer_on() {
+  [ "$(head -c 16 "$dir/computer" 2>/dev/null | tr -d ' \r\n\t')" = on ]
+}
 
 # only <value> <set for tr>: not empty and made of nothing but those characters
 only() { [ -n "$1" ] && [ -z "$(printf '%s' "$1" | LC_ALL=C tr -d "$2")" ]; }
@@ -33,7 +51,7 @@ ensure() {
   at=$(cat "$dir/bridge.alive" 2>/dev/null)
   only "$at" '0-9' || at=0
   [ $(($(date +%s) - at)) -lt "$ALIVE_S" ] && exit 0
-  date +%s >"$dir/bridge.alive"     # a second call right behind this one starts nothing
+  stamp     # a second call right behind this one starts nothing
   # Detached, in its own process group, and holding none of the caller's
   # stdin, stdout or stderr: a hook whose child keeps its stdout never ends.
   if command -v setsid >/dev/null 2>&1; then
@@ -49,11 +67,14 @@ ensure() {
 claude_in() {
   local o="$1" e="$2" where="$3" pid n=0
   shift 3
+  # its own process group, so giving up stops whatever it started too (see run_shell)
+  set -m
   ( cd "$where" 2>/dev/null && exec claude "$@" ) </dev/null >>"$o" 2>>"$e" &
   pid=$!
+  set +m
   while kill -0 "$pid" 2>/dev/null; do
     if [ "$n" -ge $((limit * 5)) ]; then
-      kill "$pid" 2>/dev/null
+      kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null
       echo "claude did not answer within $limit seconds" >>"$o"
       break
     fi
@@ -61,6 +82,32 @@ claude_in() {
     n=$((n + 1))
   done
   wait "$pid" 2>/dev/null
+}
+
+# run_shell <output file> <folder> <command>: one command of Boxy's agent, in
+# a bash of its own, given up after $exec_limit seconds; ends with its exit code
+run_shell() {
+  local o="$1" where="$2" what="$3" pid n=0 code
+  # its own process group (job control on for this one start), so a command
+  # given up is stopped with everything it started: killing only the shell
+  # left a `sleep` running on Git Bash
+  set -m
+  ( cd "$where" 2>/dev/null || { echo "no such folder: $where"; exit 2; }
+    exec bash -c "$what" ) </dev/null >>"$o" 2>&1 &
+  pid=$!
+  set +m
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$n" -ge $((exec_limit * 5)) ]; then
+      kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null
+      echo "stopped: it ran longer than $exec_limit seconds" >>"$o"
+      break
+    fi
+    sleep 0.2
+    n=$((n + 1))
+  done
+  wait "$pid" 2>/dev/null
+  code=$?
+  echo "exit code $code" >>"$o"
 }
 
 # post <kind> <file> [command id]
@@ -131,9 +178,18 @@ run_command() {
       fi ;;
     stop) claude_in "$res" "$res" "$dir" stop "$session" ;;
     report) report_lists; echo "reported" >>"$res" ;;
+    exec)
+      # looked at again here: the server's word is never enough
+      if ! computer_on; then
+        echo "Boxy may not run commands on this computer: it is turned off here" >>"$res"
+      elif [ -z "$text" ]; then
+        echo "nothing to run" >>"$res"
+      else
+        run_shell "$res" "${cwd:-$HOME}" "$text"
+      fi ;;
     *) echo "bad command" >>"$res" ;;
   esac
-  head -c 8000 "$res" >"$out"
+  head -c 16000 "$res" >"$out"
   post result "$out" "$id"
 }
 
@@ -162,7 +218,7 @@ run() {
 
   token=$(cat "$dir/token")
   server=$(cat "$dir/server")
-  date +%s >"$dir/bridge.alive"
+  stamp
   report_lists
   round=0
   while :; do
@@ -171,10 +227,12 @@ run() {
     token=$(cat "$dir/token")
     server=$(cat "$dir/server")
     [ -n "$token" ] && [ -n "$server" ] || exit 0
-    date +%s >"$dir/bridge.alive"
+    stamp
     # the server answers within a minute (Cloudflare cuts a request at 100 s)
+    computer=off
+    computer_on && computer=on
     code=$(curl -sS -o "$out" -w '%{http_code}' --max-time 75 \
-      -H "Authorization: Bearer $token" "$server/claude/bridge/next" 2>/dev/null) || code=000
+      -H "Authorization: Bearer $token" "$server/claude/bridge/next?computer=$computer" 2>/dev/null) || code=000
     case "$code" in
       200) run_command ;;
       204) ;;
